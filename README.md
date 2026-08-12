@@ -2,8 +2,6 @@
 
 BB Switch 是一个 macOS 菜单栏模型切换器，用于快速切换 Claude Code、Codex 和 OpenCode 的 Provider 与模型。
 
-![BB Switch](docs/preview.png)
-
 ## 功能
 
 - 原生 macOS 菜单，按 `Agent → Provider → 模型` 操作。
@@ -43,3 +41,5 @@ make clean
 ## 分发说明
 
 `make package` 生成 Universal 2 压缩包。当前使用本地临时签名；公开分发需要 Developer ID 签名和 Apple 公证。
+
+![BB Switch](docs/preview.png)
