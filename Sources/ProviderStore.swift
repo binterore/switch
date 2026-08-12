@@ -9,6 +9,22 @@ struct ProviderProfile: Codable, Hashable {
     var models: [String]
 }
 
+enum ModelDiscoveryError: LocalizedError {
+    case invalidURL
+    case invalidResponse
+    case httpStatus(Int)
+    case noModels
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL: return "Base URL 无效"
+        case .invalidResponse: return "接口返回格式无法识别"
+        case .httpStatus(let status): return "接口返回 HTTP \(status)"
+        case .noModels: return "响应中没有模型"
+        }
+    }
+}
+
 final class ProviderStore {
     static let shared = ProviderStore()
     static let keychainService = "com.binterore.bbswitch.provider"
@@ -46,6 +62,20 @@ final class ProviderStore {
         return profile
     }
 
+    @discardableResult
+    func update(_ profile: ProviderProfile, name: String, baseURL: String,
+                apiKey: String, models: [String]) -> ProviderProfile {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id && $0.agentID == profile.agentID }) else {
+            return profile
+        }
+        let updated = ProviderProfile(id: profile.id, agentID: profile.agentID,
+                                      name: name, baseURL: baseURL, models: models)
+        profiles[index] = updated
+        save()
+        setAPIKey(apiKey, account: Self.keychainAccount(for: updated))
+        return updated
+    }
+
     func remove(_ profile: ProviderProfile) {
         profiles.removeAll { $0.id == profile.id && $0.agentID == profile.agentID }
         save()
@@ -60,6 +90,64 @@ final class ProviderStore {
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
               let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    func fetchModels(baseURL: String, apiKey: String, agentID: String,
+                     completion: @escaping (Result<[String], Error>) -> Void) {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let endpoint = trimmed.hasSuffix("/models") ? trimmed : trimmed + "/models"
+        guard let url = URL(string: endpoint) else {
+            completion(.failure(ModelDiscoveryError.invalidURL))
+            return
+        }
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            if agentID == "claude" {
+                request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+                request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            }
+        }
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let result: Result<[String], Error>
+            if let error {
+                result = .failure(error)
+            } else if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                result = .failure(ModelDiscoveryError.httpStatus(http.statusCode))
+            } else if let data, let models = Self.parseModels(data), !models.isEmpty {
+                result = .success(models)
+            } else {
+                result = .failure(ModelDiscoveryError.noModels)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }.resume()
+    }
+
+    private static func parseModels(_ data: Data) -> [String]? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        var values: [String] = []
+        if let dictionary = object as? [String: Any] {
+            for key in ["data", "models"] {
+                if let rows = dictionary[key] as? [[String: Any]] {
+                    values.append(contentsOf: rows.compactMap {
+                        $0["id"] as? String ?? $0["name"] as? String ?? $0["model"] as? String
+                    })
+                } else if let strings = dictionary[key] as? [String] {
+                    values.append(contentsOf: strings)
+                }
+            }
+        } else if let rows = object as? [[String: Any]] {
+            values.append(contentsOf: rows.compactMap { $0["id"] as? String ?? $0["name"] as? String })
+        } else if let strings = object as? [String] {
+            values.append(contentsOf: strings)
+        }
+        var seen = Set<String>()
+        return values
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     private func setAPIKey(_ value: String, account: String) {
